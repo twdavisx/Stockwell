@@ -16,7 +16,7 @@ The GPU implementations use **CuPy** for efficient parallel computation on NVIDI
 - Exploits conjugate symmetry for negative frequencies  
 - Vectorized matrix-based implementation for performance  
 - GPU acceleration using CuPy  
-- `fdost2vec()` — converts FDOST coefficient vector into dyadic band structure  
+- `fdost2m()` — converts FDOST coefficient vector into matrix dyadic band structure  
 
 ### **Stockwell Transform (CPU + GPU)**
 - Professor-provided vectorized version adapted for GPU  
