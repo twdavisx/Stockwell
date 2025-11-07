@@ -241,6 +241,46 @@ def plot_st(st_matrix: np.ndarray, t, f, title="Stockwell Transform"):
     plt.show()
 
 '''''
+Visualising FDOST functions
+1. fdost2m
+    turns the n coefficients into an n/2 x n matrix. Only positive values
+2. plot_fdost
+    plotting function for the matrix
+'''
+
+def fdost2m(arr: np.ndarray):
+    #positive values only
+    n = len(arr)
+    m = np.zeros((n, n*2), dtype=complex)
+
+    m[0] = arr[0]
+    m[1] = arr[1]
+
+    index = 2
+    n*=2
+    for i in range(1,int(np.log2(n//2))):
+        k = 2**i
+        j = n//k
+        for p in range(k):
+            m[index:index+k, j*p:j*(p+1)] = arr[index+p]
+        index+=k
+
+    return np.flip(m,1)
+
+
+def plt_fdost(m, f = None):
+    if f == None:
+        f = m.shape[0]
+    plt.figure(figsize=(10,6))
+    plt.imshow(np.abs(m), aspect='auto', origin='lower', cmap='viridis')
+    plt.colorbar(label='Magnitude')
+    plt.tight_layout()
+    plt.yscale('log')
+    plt.ylim(0.05, f)
+    plt.show()
+
+
+'''''
 Test Functions:
     1. Parsevals
     2. orthogonality
