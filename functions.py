@@ -3,9 +3,77 @@ import matplotlib.pyplot as plt
 import cupy as cp
 
 
+'''''
+All functions created for Nweke Research Lab.
+'''
+
 ''''
 fDOST for Real valued input only. If real valued, negative frequencies are conjugate symetric
+Diagonal Ramp * IFFT matrix version
+Runtime O(NlogN)
 '''''
+def fDOST(h: np.ndarray):
+    n = len(h)
+    H = np.fft.fft(h, norm='ortho')
+    S = np.zeros(n, dtype=complex)
+
+    S[n//2] = H[0]
+    S[n//2 + 1] = -H[1] # simplifies to -1: np.exp(-2j*(n//2) * np.pi/n)
+
+    for p in range(2, int(np.log2(n))):
+        b = 2**(p-1)
+        v = b + 2**(p-2)
+        k = np.arange(v - b//2, v + b//2)
+        tau = np.arange(b)
+
+        R = np.exp(-2j*np.pi*tau/2)
+        V = np.fft.ifft(H[k], norm='ortho')
+
+        T = R*V
+        S[n//2+b: n//2+b+b] = T
+
+
+    S[1:n//2] = np.conj(S[n//2+1:][::-1])
+
+    S[0] = H[n//2]
+
+    return S
+'''''
+GPU version of fDOST
+'''''
+def fDOSTgpu(h: cp.ndarray):
+    n = len(h)
+    H = cp.fft.fft(h, norm='ortho')
+    S = cp.zeros(n, dtype=complex)
+
+    S[n//2] = H[0]
+    S[n//2 + 1] = -H[1] # simplifies to -1: np.exp(-2j*(n//2) * np.pi/n)
+
+    for p in range(2, int(cp.log2(n))):
+        b = 2**(p-1)
+        v = b + 2**(p-2)
+        k = cp.arange(v - b//2, v + b//2)
+        tau = cp.arange(b)
+
+        R = cp.exp(-2j*cp.pi*tau/2)
+        V = cp.fft.ifft(H[k], norm='ortho')
+
+        T = R*V
+        S[n//2+b: n//2+b+b] = T
+
+
+    S[1:n//2] = cp.conj(S[n//2+1:][::-1])
+
+    S[0] = H[n//2]
+
+    return S
+
+
+'''''
+Previous versions to build NlogN version
+
+
+Vectorized:
 def fDOST(h: np.ndarray):
     n = len(h)
     H = np.fft.fft(h, norm='ortho')
@@ -29,34 +97,8 @@ def fDOST(h: np.ndarray):
 
     return S
 
-'''''
-GPU version of fDOST
-'''''
-def fDOSTgpu(h: cp.ndarray):
-    n = len(h)
-    H = cp.fft.fft(h, norm='ortho')
-    S = cp.zeros(n, dtype=complex)
-
-    S[n//2] = H[0]
-    S[n//2 + 1] = -H[1] # simplifies to -1: np.exp(-2j*(n//2) * np.pi/n)
-
-    for p in range(2, int(cp.log2(n))):
-        b = 2**(p-1)
-        v = b + 2**(p-2)
-        tau = cp.arange(b)
-        k = cp.arange(v - b//2, v + b//2)
-        exp_matrix = cp.exp(2j*cp.pi*cp.outer(tau,k)/b)
-        U = ((cp.exp(-1j*cp.pi*tau)*exp_matrix) @ H[k])* (1/cp.sqrt(b))
-        S[n//2+b: n//2+b+b] = U
-    
-    S[1:n//2] = cp.conj(S[n//2+1:][::-1])
-
-    S[0] = H[n//2]
-
-    return S
-
-'''''
-non Vectorized version for readability
+  
+Non Vectorized:
 def fDOST(h):
     n = len(h)
     H = np.fft.fft(h, norm='ortho')
@@ -243,12 +285,14 @@ def plot_st(st_matrix: np.ndarray, t, f, title="Stockwell Transform"):
 '''''
 Visualising FDOST functions
 1. fdost2m
-    turns the n coefficients into an n/2 x n matrix. Only positive values
+    turns the n coefficients into an n/2 x n matrix. 
+    Only positive values. 
+    Now takes in max f to speed up comuptation.
 2. plot_fdost
     plotting function for the matrix
 '''
 
-def fdost2m(arr: np.ndarray):
+def fdost2m(arr: np.ndarray, f: int = None):
     #positive values only
     n = len(arr)
     m = np.zeros((n, n*2), dtype=complex)
@@ -264,13 +308,21 @@ def fdost2m(arr: np.ndarray):
         for p in range(k):
             m[index:index+k, j*p:j*(p+1)] = arr[index+p]
         index+=k
+        if k != None:
+            if index >= f:
+                break
+    
+    if k != None:
+        m = m[:f]
 
-    return np.flip(m,1)
+    return m
 
 
 def plt_fdost(m, f = None):
     if f == None:
         f = m.shape[0]
+    else:
+        m = m[:f]
     plt.figure(figsize=(10,6))
     plt.imshow(np.abs(m), aspect='auto', origin='lower', cmap='viridis')
     plt.colorbar(label='Magnitude')
