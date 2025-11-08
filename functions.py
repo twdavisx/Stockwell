@@ -5,7 +5,35 @@ import cupy as cp
 
 '''''
 All functions created for Nweke Research Lab.
+Function Used for Research
 '''
+def fDOST(h: np.ndarray, f = None):
+    n = len(h)
+    H = np.fft.fft(h, norm='ortho')
+    S = np.zeros(n//2, dtype=complex)
+
+    S[0] = H[0]
+    S[1] = -H[1] # simplifies to -1: np.exp(-2j*(n//2) * np.pi/n)
+
+    for p in range(2, int(np.log2(n))):
+        b = 2**(p-1)
+        v = b + 2**(p-2)
+        k = np.arange(v - b//2, v + b//2)
+        tau = np.arange(b)
+
+        R = np.exp(-2j*np.pi*tau/2)
+        V = np.fft.ifft(H[k], norm='ortho')
+
+        T = R*V
+        S[b: 2*b] = T
+        if f != None:
+            if b >= f:
+                break
+    
+    if f!= None:
+        S = S[:f]
+
+    return S
 
 ''''
 fDOST for Real valued input only. If real valued, negative frequencies are conjugate symetric
