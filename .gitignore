@@ -2,3 +2,4 @@ papers
 datacollection/DEC*DATA/
 .gitignore
 *.mseed
+*.png
