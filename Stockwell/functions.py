@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from typing import Optional
+import cupy as cp
 
 '''''
 All functions created for Nweke Research Lab.
@@ -93,62 +94,23 @@ def fDOST(h):
     return S
 '''''
 
+
 '''''
 Professor given Stockwell Transform vectorized
 '''
 
-def stockwell(timeseries: np.ndarray, minfreq=0, maxfreq=None, freqsamplingrate=1):
-
-    n = len(timeseries)
-    if maxfreq is None:
-        maxfreq = n // 2
-
-    vector_fft = np.fft.fft(timeseries)
-    vector_fft = np.concatenate([vector_fft, vector_fft])
-
-    step = int(freqsamplingrate)
-    freq_counters = np.arange(step, (maxfreq - minfreq) + 1, step, dtype=int)
-    current_freqs = (minfreq + freq_counters).astype(int)
-
-    current_freqs = current_freqs[current_freqs > 0]
-
-    spe_nelements = 1 + len(current_freqs)
-
-    st_matrix = np.zeros((spe_nelements, n), dtype=complex)
-    st_matrix[0, :] = np.mean(timeseries) * np.ones(n)
-
-    if len(current_freqs) == 0:
-        return st_matrix
-
-    v_front = (np.arange(n, dtype=float) ** 2)
-    v_back  = (np.arange(-n, 0, dtype=float) ** 2)
-    vector = np.concatenate([v_front, v_back])
-
-    scales = (-2.0 * np.pi**2) / (current_freqs[:, None].astype(float) ** 2)
-    voice = vector[None, :] * scales
-
-    gauss_windows = np.exp(voice[:, :n]) + np.exp(voice[:, n:])
-
-    cols = np.arange(n)
-    idx = current_freqs[:, None] + cols[None, :]
-    fft_slices = vector_fft[idx]
-
-    st_rows = np.fft.ifft(fft_slices * gauss_windows, axis=1)
-
-    st_matrix[1:1 + len(current_freqs), :] = st_rows
-
-    return st_matrix
-
-def stockwell_chunked_vectorized(
+def stockwell(
     x: np.ndarray,
     dt: float,
     kmin: int = 0,
     kmax: Optional[int] = None,
     kstep: int = 1,
+    k_bins: Optional[np.ndarray] = None,
     chunk_size: int = 256,
     mmap_path: Optional[str] = None,
+    decimate: int = 1,
 ):
-    real = np.float16
+    real = np.float32
     out_dtype = np.complex64
 
     x = np.asarray(x, dtype=real)
@@ -157,13 +119,18 @@ def stockwell_chunked_vectorized(
     if kmax is None:
         kmax = n // 2
 
-    k_bins = np.arange(kmin, kmax + 1, kstep, dtype=int)
+    if k_bins is None:
+        k_bins = np.arange(kmin, kmax + 1, kstep, dtype=int)
+
+    kmin = int(k_bins[0])
     num_k  = k_bins.size
 
+    n_out = len(range(0, n, decimate))
+
     if mmap_path is None:
-        S = np.zeros((num_k, n), dtype=out_dtype)
+        S = np.zeros((num_k, n_out), dtype=out_dtype)
     else:
-        S = np.memmap(mmap_path, mode="w+", dtype=out_dtype, shape=(num_k, n))
+        S = np.memmap(mmap_path, mode="w+", dtype=out_dtype, shape=(num_k, n_out))
 
     row_cursor = (kmin==0)
     if kmin == 0:
@@ -186,8 +153,7 @@ def stockwell_chunked_vectorized(
         if B == 0:
             break
 
-        scale = -2.0 * (np.pi ** 2)
-        scale = np.float16(scale) / (k_batch.astype(np.float32) ** 2)
+        scale = -2.0 * (np.pi ** 2) / (k_batch.astype(np.float32) ** 2)
 
         s = scale[:, None]
 
@@ -197,8 +163,7 @@ def stockwell_chunked_vectorized(
         slices = X2[idx_start]
 
         rows = np.fft.ifft(slices * gauss, axis=1)
-
-        S[row_cursor:row_cursor + B, :] = rows.astype(out_dtype, copy=False)
+        S[row_cursor:row_cursor + B, :] = rows[:, ::decimate].astype(out_dtype, copy=False)
         row_cursor += B
 
     f_hz = kmax / (n * dt)
@@ -206,159 +171,76 @@ def stockwell_chunked_vectorized(
     return S, f_hz
 
 
-'''''
-Function given by professor:
+#stockwell function optimized for GPU, version used for benchmarking and optimization
+@cp.fuse(kernel_name='gauss_kernel')
+def fused_gauss(k, tf, tb):
+    s = -19.7392088 / (k * k)
+    return cp.exp(s * tf) + cp.exp(s * tb)
 
-def st(timeseries, minfreq=0, maxfreq=len(timeseries)//2, freqsamplingrate=1):
-
-    vector_fft = np.fft.fft(timeseries)
-    vector_fft = np.concatenate([vector_fft, vector_fft])
-    st_matrix = np.zeros((spe_nelements, n), dtype=complex)
-    st_matrix[0, :] = np.mean(timeseries) * np.ones(n)
-
-    freq_idx = 1
-    freq_counter = int(freqsamplingrate)
-
-    while freq_counter <= (maxfreq - minfreq) and freq_idx < spe_nelements:
-        current_freq = minfreq + freq_counter
-        
-        if current_freq > 0:  # Skip zero frequency as it's handled above
-            # Create frequency domain indices
-            vector = np.zeros(2 * n)
-            vector[:n] = np.arange(n) ** 2
-            vector[n:] = np.arange(-n, 0) ** 2
-            # Apply Gaussian scaling
-            voice_vector = vector * (-1 * 2 * np.pi**2 / current_freq**2)
-            # Compute Gaussian window
-            gauss_window = np.exp(voice_vector[:n]) + np.exp(voice_vector[n:])
-            
-            fft_slice = vector_fft[int(current_freq):int(current_freq) + n]
-            st_matrix[freq_idx, :] = np.fft.ifft(fft_slice * gauss_window)
-            freq_idx += 1
-        
-        freq_counter += int(freqsamplingrate)
-    return st_matrix
-
-def stockwell_chunked(
-    timeseries: np.ndarray,
+def stockwell_GPU(
+    x: cp.ndarray,
     dt: float,
-    kmin: int = 0,
-    kmax: Optional[int] = None,
-    kstep: int = 1,
+    kmax: int,
+    k_bins: cp.ndarray,
     chunk_size: int = 256,
-    out_dtype=np.complex128,
-    mmap_path: Optional[str] = None,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Frequency-chunked Stockwell Transform (S-transform) closely following your logic.
+    decimate: int = 1,
+):
+    
+    real = cp.float32
+    out_dtype = cp.complex64
 
-    Parameters
-    ----------
-    timeseries : 1D np.ndarray (real or complex)
-        Input signal of length n.
-    dt : float
-        Sampling interval (seconds per sample).
-    kmin, kmax : int
-        Frequency-bin index range to compute. k=0 is DC. Default kmax = n//2.
-        NOTE: bin->Hz: f[k] = k / (n*dt)
-    kstep : int
-        Step in frequency-bin indices (e.g., 1 = every bin; 2 = every other bin).
-    chunk_size : int
-        Number of frequency bins to process at once (batch size).
-    out_dtype : numpy dtype
-        Output dtype for the S-transform matrix (complex).
-    mmap_path : str or None
-        If provided, results are written to a memory-mapped file on disk to limit RAM.
-        The file will store a (num_k, n) complex array.
+    stream1 = cp.cuda.Stream()
+    stream2 = cp.cuda.Stream()
 
-    Returns
-    -------
-    f_hz : 1D np.ndarray of shape (num_k,)
-        Frequencies (Hz) corresponding to S-transform rows.
-    S : 2D np.ndarray of shape (num_k, n), complex
-        S-transform matrix. If mmap_path is provided, this is a memmap array.
-        Row order matches f_hz.
-    """
-    x = np.asarray(timeseries)
+    x = cp.asarray(x, dtype=real)
     n = x.size
-    if kmax is None:
-        kmax = n // 2
 
-    # Build the list of k bins to compute
-    k_bins = np.arange(kmin, kmax + 1, kstep, dtype=int)
-    num_k = k_bins.size
+    with stream1:
+        if kmax is None:
+            kmax = n // 2
+            
+        kmin = int(k_bins[0])
+        num_k  = k_bins.size
+        n_out = len(range(0, n, decimate))
+        S = cp.zeros((num_k, n_out), dtype=out_dtype)
+    
+        row_cursor = (kmin==0)
+        if kmin == 0:
+            S[0, :] = cp.mean(x).astype(real)
+            k_bins = k_bins[1:]
+            num_k-=1
+        t_front = cp.arange(n, dtype=cp.float32)**2
+        t_back  = cp.arange(-n, 0, dtype=cp.float32)**2
+        cols = cp.arange(n)
 
-    # Output allocation (optionally memmap to avoid huge RAM usage)
-    if mmap_path is None:
-        S = np.zeros((num_k, n), dtype=out_dtype)
-    else:
-        S = np.memmap(mmap_path, mode='w+', dtype=out_dtype, shape=(num_k, n))
+    with stream2:
+        X = cp.fft.fft(x)
+        X2 = cp.concatenate([X, X])
 
-    # DC row handling: S[0,:] is the mean repeated if kmin == 0
-    start_row = 0
-    if kmin == 0:
-        S[0, :] = np.mean(x)
-        # Start computing from next frequency
-        k_bins = k_bins[1:]
-        num_k = k_bins.size
-        start_row = 1
+    stream1.synchronize()
+    stream2.synchronize()
 
-    # FFT once; duplicate to allow easy n-length slices from any start k
-    X = np.fft.fft(x)
-    X2 = np.concatenate([X, X])  # length 2n for wrap-free slicing of length n
-
-    # Precompute index-squared arrays once (avoid rebuilding in the loop)
-    idx = np.arange(n)
-    idx2 = idx ** 2
-    neg_idx2 = np.arange(-n, 0) ** 2
-
-    # Process in frequency chunks
-    row_cursor = start_row
+        
     for i in range(0, num_k, chunk_size):
-        k_batch = k_bins[i : i + chunk_size]           # shape (B,)
+        
+        k_batch = k_bins[i : i + chunk_size]
         B = k_batch.size
+        
         if B == 0:
             break
-
-        # For S-transform, Gaussian width ~ 1/k. Implement the classic factor:
-        # exponent scale = - 2*pi^2 / k^2   (works in "bin index" domain)
-        # Handle any accidental zeros (shouldn't happen since we skipped k=0)
-        scale = -2.0 * (np.pi ** 2) / np.maximum(k_batch.astype(float), 1.0) ** 2  # shape (B,)
-
-        # Build Gaussian windows for the batch with broadcasting:
-        # gauss[b, :] = exp(scale[b]*idx^2) + exp(scale[b]*(neg_idx)^2)
-        # Shape: (B, n)
-        gauss_pos = np.exp(scale[:, None] * idx2[None, :])
-        gauss_neg = np.exp(scale[:, None] * neg_idx2[None, :])
-        gauss = gauss_pos + gauss_neg
-
-        # Assemble spectral slices for the batch.
-        # Each row b takes X2[k : k+n] for k=k_batch[b]
-        # Using a Python list here is fine since B (chunk_size) is modest.
-        slices = np.empty((B, n), dtype=X2.dtype)
-        for b, k0 in enumerate(k_batch):
-            slices[b, :] = X2[k0 : k0 + n]
-
-        # Window in frequency domain, then inverse FFT along time axis (axis=1)
-        # Result is the S-transform rows for this chunk
-        rows = np.fft.ifft(slices * gauss, axis=1)
-
-        # Store into output (casting to desired dtype)
-        S[row_cursor : row_cursor + B, :] = rows.astype(out_dtype, copy=False)
+            
+        gauss = fused_gauss(k_batch[:, None], t_front[None, :], t_back[None, :])
+        
+        idx_start = k_batch[:, None] + cols[None, :]
+        slices = X2[idx_start]
+        rows = cp.fft.ifft(slices * gauss, axis=1)
+        
+        S[row_cursor:row_cursor + B, :] = rows[:, ::decimate].astype(out_dtype, copy=False)
         row_cursor += B
-
-    # Frequencies (Hz) corresponding to each row (including k=0 if present)
-    if kmin == 0:
-        all_k = np.concatenate([[0], k_bins])
-    else:
-        all_k = k_bins
-    f_hz = all_k / (n * dt)
-
-    t_sec = np.arange(n) * dt
-
-    return S, t_sec, f_hz
-'''
-
+        
+    f_hz = kmax / (n * dt)
+    
+    return S, f_hz
 
 
 '''''
@@ -368,7 +250,9 @@ Visualising FDOST functions
     Only positive values. 
     Now takes in max f to speed up comuptation.
 2. plot_st
-    plotting function for the matrix
+    plotting matrix given linear bins
+3. plot_2
+    plotting matrix given log bins
 '''
 
 def fdost2m(arr: np.ndarray, f: int = None):
@@ -421,37 +305,23 @@ def plot_st(st_matrix, f, title="Stockwell Transform"):
     plt.show()
 
 
-'''''
-Plotting function given by professor
-'''
+def plot_2(st_matrix, f_bins, title="Stockwell Transform", cap=1):
+    st = np.abs(st_matrix)
+    vmax = np.nanpercentile(st, 100 - cap)
+    vmin = np.nanpercentile(st, cap)
 
-def plot(st_matrix: np.ndarray, t, f, title="Stockwell Transform"):
-    """
-    Plot the Stockwell Transform as a time-frequency representation.
-    
-    Parameters:
-    -----------
-    st_matrix : ndarray
-        Complex matrix from the Stockwell transform
-    t : ndarray
-        Time vector
-    f : ndarray
-        Frequency vector
-    title : str
-        Plot title
-    """
-    
+    t = np.arange(st_matrix.shape[1])
+
     plt.figure(figsize=(12, 8))
-    plt.pcolormesh(t, f, np.abs(st_matrix), shading='auto')
-    plt.colorbar(label='Magnitude')
-    plt.xlabel('Time')
-    plt.ylabel('Frequency')
-    plt.yscale('log')
-    plt.ylim(0.05, np.max(f))
+    plt.pcolormesh(t, f_bins, st, cmap='viridis', vmin=vmin, vmax=vmax, shading='auto')
+    plt.colorbar(label="Magnitude")
+    plt.xlabel("Time (samples)")
+    plt.ylabel("Frequency (Hz)")
+    plt.yscale("log")
+    plt.ylim(f_bins[f_bins > 0].min(), f_bins.max())
     plt.title(title)
     plt.tight_layout()
     plt.show()
-
 
 '''''
 Test Functions:
@@ -470,9 +340,7 @@ def Parsevals(h, func):
     print(f"Energy preserved: {np.isclose(energy_h, energy_S)}")
     return S
 
-'''''
-CHATGPT orthogonality test
-'''
+
 def test_basis_orthogonality(n, dost_func):
     """
     Check whether the FDOST operator is orthonormal by applying it
@@ -495,3 +363,14 @@ def test_basis_orthogonality(n, dost_func):
     print(f"Total off-diagonal energy: {total_offdiag:.2e}")
     print(f"Max off-diagonal entry:    {max_offdiag:.2e}")
     print(f"Max diag deviation:        {max_diag_dev:.2e}")
+
+'''''
+Other:
+'''
+
+def medianFilter(h, n):
+    for _ in range(n):
+        for i in range(1,h.size-1):
+            h[i] = (h[i-1]+h[i+1])/2
+    
+    return h
